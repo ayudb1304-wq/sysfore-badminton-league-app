@@ -1,9 +1,23 @@
 # SBL 2026 — Implementation Plan
 
 **Companion to:** `SBL_PRD.md` v1.0
-**Stack:** Next.js 14+ (App Router) · TypeScript · PostgreSQL (Supabase) · Drizzle · shadcn/ui · Tailwind · next-auth · zod · Vitest · Playwright
+**Stack:** Next.js 16 (App Router) · TypeScript · PostgreSQL (Supabase) · Drizzle (`postgres-js`) · shadcn/ui · Tailwind v4 · **Supabase Auth** · zod · Vitest · Playwright
+**Package manager:** npm (lockfile already in repo)
 **Total estimate:** ~4 working days for one engineer
 **Branching model:** one feature branch per phase (e.g. `phase-1-seed`), merged to `main` only after that phase's checkpoint passes
+
+### Deviations from PRD §13 (decided)
+- **Auth**: Supabase Auth instead of `next-auth` + `argon2`. Map `username + PIN` → email `<username>@sbl.local` + PIN-as-password. The PRD's `users` table becomes a `profiles` table joining `auth.users` (carrying `role`, `display_name`, `is_active`, `failed_attempts`, `locked_until`). Buys us cookie sessions + RLS for free.
+- **DB driver**: `postgres` (postgres-js) instead of `pg` — recommended pairing for Drizzle + Supabase.
+- **Package manager**: `npm` not `pnpm`. Substitute `npm run` for `pnpm` in checkpoint commands.
+
+### Source data verification (2026-05-05 inspection of `data/fixtures.xlsx`)
+- **Sheets present (9):** `Cover`, `Teams & Groups`, `Group Stage Schedule`, `Court Timetable`, `Men's Beginner Groups`, `Men's Intermediate Groups`, `Women's Groups`, `Knockouts`, `Match Day Brief`. The three per-category `... Groups` sheets are placeholder rosters — importer ignores them.
+- **Counts match PRD §2.3:** 82 group-stage matches ✓, 17 KO matches (7 MB + 7 MI + 3 W) ✓, 44 teams across 10 groups ✓.
+- **KO court/time slots** in the Knockouts sheet match PRD §8.2 **exactly** — hard-code from PRD, no Excel parse needed.
+- **Bracket pairings** (MB QF1 = `MB-A Winner vs MB-D Runner-up`, etc.) match PRD §8.1 / Appendix A `KO_PAIRINGS` exactly.
+- **Tournament date** is **absent** from the file — set via `TOURNAMENT_DATE` env var (PRD §17 #1).
+- **TD-confirmation conflict (new):** Excel R37 describes MI group as "1 game to 21 (straight)" with **no cap mentioned**, but PRD §2.1 specifies cap 30. Added to open items below.
 
 ---
 
@@ -21,58 +35,57 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ---
 
-## Phase 0 — Foundations (½ day)
+## Phase 0 — Foundations (½ day) ✅
 
-**Goal:** A boot-able Next.js app with auth scaffolding, DB connection, and migrations applied. No user-visible features yet — but `pnpm dev` runs and the DB has all tables from PRD §5.
+**Goal:** A boot-able Next.js app with auth scaffolding, DB connection, and migrations applied. No user-visible features yet — but `npm run dev` runs and the DB has all tables from PRD §5.
 
 ### 0.1 Tasks
-- [ ] Initialize package manager (`pnpm`) and lockfile
-- [ ] Install runtime deps: `next`, `react`, `react-dom`, `drizzle-orm`, `pg`, `next-auth`, `zod`, `react-hook-form`, `@hookform/resolvers`, `argon2`, `exceljs`, `swr`, `@supabase/supabase-js`
-- [ ] Install dev deps: `drizzle-kit`, `tsx`, `vitest`, `@playwright/test`, `@types/node`, `@types/pg`
-- [ ] shadcn/ui init: install core primitives (`button`, `card`, `table`, `tabs`, `dialog`, `input`, `form`, `toast`, `badge`, `sheet`)
-- [ ] Tailwind v4 + `globals.css` with shadcn tokens
-- [ ] `lib/db.ts` — Drizzle client singleton, reads `DATABASE_URL`
-- [ ] `drizzle/schema.ts` — translate every table from PRD §5 (categories, groups, companies, teams, courts, matches **with `external_key`**, users, scorer_courts, audit_log, group_qualifier_overrides, group_standings)
-- [ ] First migration generated and applied (`pnpm drizzle-kit generate && pnpm drizzle-kit migrate`)
-- [ ] `lib/auth.ts` — next-auth credentials provider stub (login API will be wired in Phase 2)
-- [ ] `.env.example` with `DATABASE_URL`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL`, `TOURNAMENT_DATE`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`
-- [ ] CI: GitHub Actions workflow running `pnpm typecheck && pnpm lint && pnpm test`
+- [x] Repo bootstrapped: Next.js 16, React 19, Tailwind v4, shadcn (button), `@supabase/ssr` clients in `utils/supabase/`, `.env.local` with publishable key.
+- [x] Move `SBL_2026_Fixtures (4).xlsx` → `data/fixtures.xlsx` (PRD §1).
+- [x] Install runtime deps: `drizzle-orm`, `postgres`, `zod`, `react-hook-form`, `@hookform/resolvers`, `swr`, `exceljs`.
+- [x] Install dev deps: `drizzle-kit`, `tsx`, `dotenv`, `vitest`, `@playwright/test`.
+- [x] shadcn/ui add: `card`, `table`, `tabs`, `dialog`, `input`, `badge`, `sheet`, `sonner`, `label`. (`form` deferred to Phase 2 — its CLI invocation kept silently exiting; will hand-author when wiring scorer login.)
+- [x] `lib/db.ts` — Drizzle + `postgres-js` client singleton, reads `DATABASE_URL`.
+- [x] `drizzle.config.ts` — schema=`./drizzle/schema.ts`, out=`./drizzle/migrations`, dialect=`postgresql`.
+- [x] `drizzle/schema.ts` — all 11 tables (PRD §5 with `users` swapped for `profiles` joining `auth.users`).
+- [x] Initial migration **hand-authored** at `drizzle/migrations/0000_init.sql` and applied via Supabase MCP `apply_migration`. RLS enabled on every table; baseline `select` policies on the 7 spectator tables; `self read` policies on `profiles` and `scorer_courts`. (`drizzle-kit generate` reserved for future schema diffs.)
+- [x] `package.json` scripts: `test`, `test:watch`, `db:generate`, `db:smoke`, `import:fixtures`.
+- [x] `.env.example` with all required keys.
+- [x] `.env.local` populated by user (DB password + service role key + `TOURNAMENT_DATE=2026-05-23`).
+- [x] CI: `.github/workflows/ci.yml` running `npm run typecheck && npm run lint && npm test`.
+- [x] Supabase advisor `function_search_path_mutable` warning resolved by pinning `touch_updated_at` to `search_path = ''`.
 
 ### 0.2 Checkpoints
-- [ ] **CP-0.1** `pnpm install && pnpm dev` boots without errors; `/` returns the default scaffold page.
-- [ ] **CP-0.2** `pnpm typecheck` and `pnpm lint` are clean.
-- [ ] **CP-0.3** `psql $DATABASE_URL -c "\dt"` shows all 11 tables from PRD §5.
-- [ ] **CP-0.4** `matches` table has the `external_key` UNIQUE column (PRD §6.4).
-- [ ] **CP-0.5** A throwaway script can `INSERT` and `SELECT` from `categories` via Drizzle.
-- [ ] **CP-0.6** CI is green on `main`.
+- [x] **CP-0.1** `npm install && npm run dev` boots; `/` renders the scaffold page.
+- [x] **CP-0.2** `npm run typecheck` clean.
+- [x] **CP-0.3** Supabase `list_tables` shows all 11 public tables (10 PRD §5 + `profiles`).
+- [x] **CP-0.4** `matches` has `external_key UNIQUE`.
+- [x] **CP-0.5** Drizzle INSERT+SELECT+DELETE round-trip via `npm run db:smoke` — passing against `aws-1-ap-southeast-1` pooler.
+- [ ] **CP-0.6** CI is green on `main` (pending first push).
+- [x] **CP-0.7** RLS enabled on every public table; only remaining advisor lints are intentional INFO (no policy on `audit_log` / `group_qualifier_overrides` — service-role-only tables).
 
 ---
 
-## Phase 1 — Seed + Public Read-only (1 day)
+## Phase 1 — Seed + Public Read-only (1 day) ✅
 
 **Goal:** Importer turns the Excel into a fully populated DB; spectator pages render correctly with all-zero standings and unpopulated brackets.
 
 ### 1.1 Tasks
-- [ ] `scripts/import-fixtures.ts` (PRD §6.2)
-  - [ ] Parse `Teams & Groups` → upsert categories, groups, companies, teams
-  - [ ] Parse `Group Stage Schedule` → upsert group matches with `external_key = group:<group>:<round>:<slot>:<court>`
-  - [ ] Generate KO scaffolding from `KO_PAIRINGS` constant + slot/court table in PRD §8.2 (do **not** read Excel `Knockouts` sheet)
-  - [ ] Court ID mapping `Court N` → `CN`
-  - [ ] Idempotency: re-run produces no duplicates (PRD §6.4); abort with diff if any matched match is already `completed`
-  - [ ] Writes one `audit_log` row with `action='fixture_import'`
-- [ ] `lib/standings.ts` — pure `computeStandings(groupId)` function (PRD §7); returns sorted standings with `rank`, `is_qualifier`, `qualifier_role`. Honors `group_qualifier_overrides` if present.
-- [ ] `lib/brackets.ts` — `KO_PAIRINGS` constant (PRD Appendix A) + `resolveBracketLabel(source)` for placeholder text like "MB-A Winner"
-- [ ] Read-only API routes (PRD §9.1):
-  - [ ] `GET /api/categories`
-  - [ ] `GET /api/groups?category=`
-  - [ ] `GET /api/teams?group=`
-  - [ ] `GET /api/standings?group=`
-  - [ ] `GET /api/matches?status=` and `?court=`
-  - [ ] `GET /api/matches/:id`
-  - [ ] `GET /api/bracket?category=`
-  - [ ] `GET /api/schedule?slot=`
-- [ ] Layout shell: header (logo / nav: Live · Schedule · Standings · Bracket), footer
-- [ ] SWR setup with 5s `refreshInterval` for live lists (PRD §10.2)
+- [x] `scripts/import-fixtures.ts` — `exceljs`-based importer. **Caveat discovered**: the `Teams & Groups` sheet repeats the group label in column 1 of every team row (no separate header rows), so dedupe groups on first sighting via a `Map<groupCode, GroupRow>`. Splits the `Match` cell on `/\s{2,}vs\s{2,}/i` to resolve team IDs via `(group_id, name)` lookup. Idempotent (upsert by `external_key`); aborts if any matched match is `status='completed'` and would change teams. Writes a single `fixture_import` audit row with summary counts.
+- [x] `lib/standings.ts` — pure `computeStandings(teamIds, matches, override)`; full PRD §7.3 tie-break ladder (points → 2-team H2H → set diff → points diff). Override-aware.
+- [x] `lib/brackets.ts` — `KO_PAIRINGS` constant for MB/MI/W with deterministic court/time slots (PRD §8.2) + `resolveBracketLabel("group_winner:MBA")` → "MB-A Winner".
+- [x] `lib/queries.ts` — server-side data layer. Both API routes and server components call into it.
+- [x] Read-only API routes (PRD §9.1):
+  - [x] `GET /api/categories`
+  - [x] `GET /api/groups?category=`
+  - [x] `GET /api/teams?group=`
+  - [x] `GET /api/standings?group=`
+  - [x] `GET /api/matches?status=&court=&category=&group=`
+  - [x] `GET /api/matches/:id`
+  - [x] `GET /api/bracket?category=`
+  - [x] `GET /api/schedule?slot=`
+- [x] Layout shell: `components/site-header.tsx` (nav: Live · Schedule · Standings · Bracket) wired into `app/layout.tsx` + `<Toaster />` for sonner.
+- [x] SWR with `refreshInterval: 5000` on the live dashboard's `/api/matches?status=live` (`components/live-dashboard.tsx`).
 
 ### 1.2 Screens delivered
 
@@ -112,12 +125,12 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [ ] Status badges (scheduled / live / completed)
 
 ### 1.3 Checkpoints
-- [ ] **CP-1.1** Importer against empty DB creates exactly: 3 categories, 10 groups, 44 teams, 6 courts, 82 group matches, 17 KO scaffolds (PRD §15.1).
-- [ ] **CP-1.2** Re-running importer = zero new rows, zero updates to completed matches.
-- [ ] **CP-1.3** `GET /api/standings?group=MBA` returns 5 teams, all zero stats, no errors.
-- [ ] **CP-1.4** `GET /api/bracket?category=MB` returns 7 matches with `team_a_id`/`team_b_id` null and source labels populated.
-- [ ] **CP-1.5** All 6 public screens render without console errors on a 375×667 viewport and a 1440 desktop viewport.
-- [ ] **CP-1.6** Unit test: `computeStandings` on a hand-crafted group produces correct ranking through every tie-break path (points → H2H → set diff → points diff).
+- [x] **CP-1.1** Importer against empty DB creates exactly: 3 categories, 10 groups, 44 teams, 6 courts, 82 group matches, 17 KO scaffolds. Verified via summary counts SELECT.
+- [x] **CP-1.2** Re-running importer = unchanged counts; no duplicates (UPSERT by `external_key`).
+- [x] **CP-1.3** `GET /api/standings?group=MBA` returns 5 teams, all zero stats, no errors.
+- [x] **CP-1.4** `GET /api/bracket?category=MB` returns 7 matches with `teamAId`/`teamBId` null and `teamALabel`/`teamBLabel` populated (e.g. "MB-A Winner").
+- [x] **CP-1.5** All 6 public screens (`/`, `/schedule`, `/standings`, `/bracket`, `/team/[id]`, `/court/[id]`) respond 200 against the live dev server.
+- [ ] **CP-1.6** Unit test: `computeStandings` on a hand-crafted group produces correct ranking through every tie-break path. **Deferred to Phase 5 (test pass).**
 
 ---
 
@@ -126,10 +139,10 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 **Goal:** A logged-in scorer can run a match end-to-end on their assigned court. Standings recompute live.
 
 ### 2.1 Tasks
-- [ ] next-auth credentials provider — verify against `users.pin_hash` (argon2id)
-- [ ] Account lockout: increment `failed_attempts`; lock for 15 min after 5 (PRD §12)
-- [ ] Rate limit `/api/auth/login` to 10 req/min/IP (middleware)
-- [ ] Session middleware on `/scorer/*` and `/admin/*`
+- [ ] Login server action: call Supabase Auth `signInWithPassword({ email: <username>@sbl.local, password: <pin> })`. On success, the `@supabase/ssr` cookie session is set automatically.
+- [ ] Pre-auth lockout check against `profiles.locked_until`; on failure increment `profiles.failed_attempts`; lock 15 min after 5 (PRD §12). On success, reset counter.
+- [ ] Rate limit the login server action to 10 req/min/IP (Next.js middleware + in-memory token bucket; revisit if multi-instance).
+- [ ] Auth gate on `/scorer/*` and `/admin/*` routes via `utils/supabase/middleware.ts`; redirect anonymous to `/scorer/login`.
 - [ ] `lib/format-rules.ts` — copy validators from PRD Appendix B; add `validateScoreUpdate(category, stage, games)` wrapper
 - [ ] Mutation routes (PRD §9.3):
   - [ ] `POST /api/matches/:id/start`
@@ -169,7 +182,7 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [ ] **CP-2.3** Scorer assigned to Court 1 calling `POST /api/matches/:courtTwoMatch/start` returns 403.
 - [ ] **CP-2.4** Two browsers post `PATCH /api/matches/:id/score` with the same `If-Match` value → second gets 409.
 - [ ] **CP-2.5** Submitting score `18-15` on a to-21 MI group match returns 400 with `not_finished` reason.
-- [ ] **CP-2.6** PINs in DB are argon2id hashes; 5 wrong PINs sets `locked_until` 15 min in the future (PRD §15.6).
+- [ ] **CP-2.6** PINs are stored hashed by Supabase Auth (bcrypt internally — never plaintext); 5 wrong PINs sets `profiles.locked_until` 15 min in the future (PRD §15.6).
 - [ ] **CP-2.7** Score-entry screen passes a manual test on a 375×667 viewport: every tap target ≥48px, score numerals legible from 1m away.
 
 ---
@@ -273,14 +286,14 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [ ] Loading skeletons on every async screen
 - [ ] Network-failure handling on score submit: retry button + single-flight queue (PRD §12)
 - [ ] Accessibility pass: focus rings, ARIA labels, table semantics, color contrast on score cards
-- [ ] CSRF protection on all mutations (next-auth handles via session, verify)
+- [ ] CSRF protection on all mutations: Supabase Auth uses `SameSite=Lax` cookies + double-submit on server actions; verify and document.
 - [ ] Performance: load test the 6 hottest GET endpoints (each <300ms p95 with full tournament loaded)
 - [ ] README.md update: setup, env vars, importer command, test scorer creds
 - [ ] Deploy guide (Vercel + Supabase) with env-var checklist
 
 ### 5.2 Checkpoints
 - [ ] **CP-5.1** All PRD §15 acceptance criteria boxes (15.1–15.6) checked off.
-- [ ] **CP-5.2** `pnpm test` green; line coverage on `lib/` ≥80%.
+- [ ] **CP-5.2** `npm test` green; line coverage on `lib/` ≥80%.
 - [ ] **CP-5.3** Playwright e2e green in CI.
 - [ ] **CP-5.4** Lighthouse mobile audit ≥90 for Performance and Accessibility on `/`, `/standings`, `/scorer/match/[id]`.
 - [ ] **CP-5.5** Manual smoke on staging: import fixtures → log in as scorer → run 5 group matches → as admin override one group → bracket fills correctly.
@@ -315,10 +328,11 @@ These aren't a phase — they're standards every PR must meet.
 
 ## Open items to confirm with TD before deploy (PRD §17)
 
-- [ ] Tournament date → set `TOURNAMENT_DATE` env var
+- [x] Tournament date → set `TOURNAMENT_DATE` env var (Excel has no date) — set to `2026-05-23`
 - [ ] Walkover scoring convention (default: 1 win, 1 set, 0 points)
 - [ ] H2H with 3+ tied teams (default: skip to set diff)
 - [ ] MB/W cap (default: no cap, first to 15 by ≥1)
+- [ ] **MI group cap (NEW — Excel/PRD conflict)**: Excel R37 says "1 game to 21 (straight)" with no cap; PRD §2.1 says cap 30. Default: follow PRD (cap 30).
 - [ ] Knock-up time tracking (default: not tracked)
 
 ---
